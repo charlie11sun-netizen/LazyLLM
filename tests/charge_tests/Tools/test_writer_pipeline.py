@@ -1,19 +1,22 @@
+from contextlib import contextmanager
 from pathlib import Path
 from typing import List
+from unittest.mock import MagicMock, patch
 
 import pytest
 from pydantic import BaseModel
 
 import lazyllm
+from lazyllm.tools.writer.adapter.feishu import FeishuWriterAdapter
 from lazyllm.tools.writer.tools.base import WriterToolBase
 from lazyllm.tools.writer.data_models.context import DocumentSummary, WritingContext
 from lazyllm.tools.writer.data_models.quality import AuditResult, ReviewReport
 from lazyllm.tools.writer.data_models.revision import LocateResult, ModifyPlan, PatchResult, PatchSet
 from lazyllm.tools.writer.data_models.task import InputResource, Selection, TargetDocument, WritingTask
-from lazyllm.tools.writer.data_models.writer_ir import WriterBlock, WriterDocument
+from lazyllm.tools.writer.data_models.writer_ir import ContentRef, WriterBlock, WriterDocument
 from lazyllm.tools.writer.data_models.planning import SectionInstructionList
 from lazyllm.tools.writer.workflow.naive_writer_workflow import NaiveWriterWorkflow
-from lazyllm.tools.writer.utils import load_artifact_json
+from lazyllm.tools.writer.utils import load_artifact_json, parse_markdown_sections
 from ...utils import get_api_key, get_path
 
 
@@ -60,17 +63,34 @@ def test_writer_call_llm_structured_with_qwen():
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
 
-def _load_stage(stages: dict, key: str, model_class=None):
+def _stage_path(stages: dict, key: str) -> str:
     entry = stages.get(key) or {}
     if not isinstance(entry, dict):
-        return None
-    path = (
+        return ''
+    return (
         entry.get('metadata', {}).get('artifact_paths', {}).get(key)
         or entry.get('artifact_path', '')
     )
+
+
+def _load_stage(stages: dict, key: str, model_class=None):
+    path = _stage_path(stages, key)
     if not path:
         return None
     return load_artifact_json(path, model_class)
+
+
+@contextmanager
+def _mock_document_write(wf, target_document, document_id):
+    write_fs = MagicMock()
+    with patch.object(
+        wf.resource, '_resolve_document_target',
+        return_value=(
+            'feishu', f'/{document_id}.md', write_fs, FeishuWriterAdapter(),
+            target_document.uri, document_id,
+        ),
+    ):
+        yield write_fs
 
 
 def test_write_workflow_e2e():
@@ -91,7 +111,10 @@ def test_write_workflow_e2e():
         task_type='write',
         target_document=TargetDocument(
             title='Technical Overview of AI-Powered Coding Assistant',
+            uri='feishu:///writer-ir-e2e.md',
+            adapter='feishu',
         ),
+        output={'representation': 'ir'},
     )
     inputs = [
         InputResource(
@@ -121,11 +144,12 @@ def test_write_workflow_e2e():
         ),
     ]
 
-    result = lazyllm.enable_trace(
-        wf.write,
-        task=task.model_dump(),
-        input_resources=[r.model_dump() for r in inputs],
-    )
+    with _mock_document_write(wf, task.target_document, 'writer-ir-e2e') as write_fs:
+        result = lazyllm.enable_trace(
+            wf.write,
+            task=task.model_dump(),
+            input_resources=[r.model_dump() for r in inputs],
+        )
     stages = result.get('stage_results') or {}
     assert stages, 'stage_results must not be empty'
 
@@ -156,7 +180,7 @@ def test_write_workflow_e2e():
     instructions = _load_stage(stages, 'section_instructions', SectionInstructionList)
     assert instructions is not None
     assert len(instructions.instructions) >= 1
-    assert instructions.instructions[0].outline_node_id
+    assert instructions.instructions[0].content_ref.node_id
 
     # --- Step 5: draft_block ---
     draft_block = _load_stage(stages, 'draft_block', WriterBlock)
@@ -191,19 +215,131 @@ def test_write_workflow_e2e():
     assert len(rendered) >= 100
     assert final.metadata.get('output_format') == 'markdown'
 
-    write_result = _load_stage(stages, 'write_result')
-    assert write_result is not None
-
     # --- Step 10: output_review ---
     out_review = _load_stage(stages, 'draft_document_review', ReviewReport)
     assert out_review is not None
     assert isinstance(out_review.result.is_passed, bool)
     assert 0 <= out_review.result.score <= 100
 
+    # --- Step 11: write_result ---
+    write_result = _load_stage(stages, 'write_result')
+    assert write_result['doc_id'] == 'writer-ir-e2e'
+    assert write_result['block_count'] > 0
+    write_fs.write_doc_blocks.assert_called_once()
+
     # --- primary_result ---
     primary = result.get('primary_result') or {}
     primary_path = primary.get('artifact_path') if isinstance(primary, dict) else ''
     assert primary_path
+
+
+def test_write_workflow_markdown_e2e():
+    '''Run the single-section Markdown path through NaiveWriterWorkflow.write().'''
+    llm = lazyllm.OnlineChatModule(
+        source='qwen', model=QWEN_MODEL,
+        api_key=get_api_key('qwen'), stream=False,
+    )
+    store = str(
+        REPO_ROOT / 'tests' / 'charge_tests' / 'artifacts' / 'write_workflow_markdown_e2e'
+    )
+    wf = NaiveWriterWorkflow(llm=llm, artifact_store=store)
+    task = WritingTask(
+        task_id='wf-md-e2e',
+        query=(
+            'Write a concise technical note with exactly one section titled '
+            'Architecture and Deployment. Explain how a Python API service is deployed '
+            'to Kubernetes and supports both SaaS and on-premises operation.'
+        ),
+        task_type='write',
+        target_document=TargetDocument(
+            title='AI Coding Assistant Deployment Note',
+            uri='feishu:///writer-markdown-e2e.md',
+            adapter='feishu',
+        ),
+        output={'representation': 'markdown'},
+    )
+    inputs = [
+        InputResource(
+            resource_type='text',
+            resource_id='deployment-spec',
+            title='Deployment requirements',
+            inline_text=(
+                'The backend exposes a Python API service. It runs on Kubernetes. '
+                'Supported deployment modes are multi-tenant SaaS and on-premises.'
+            ),
+        ),
+    ]
+
+    with _mock_document_write(wf, task.target_document, 'writer-markdown-e2e') as write_fs:
+        result = lazyllm.enable_trace(
+            wf.write,
+            task=task.model_dump(),
+            input_resources=[resource.model_dump() for resource in inputs],
+        )
+    stages = result.get('stage_results') or {}
+    assert stages
+
+    # --- Step 1: resource_profiles ---
+    profiles = _load_stage(stages, 'resource_profiles')
+    assert isinstance(profiles, list)
+    assert len(profiles) == 1
+
+    # --- Step 2: writing_context ---
+    context = _load_stage(stages, 'writing_context', WritingContext)
+    assert context.context_id == 'wf-md-e2e'
+    assert context.facts
+
+    # --- Step 3: outline ---
+    outline = Path(_stage_path(stages, 'outline')).read_text(encoding='utf-8')
+    outline_sections = parse_markdown_sections(outline)
+    outline_h2 = [section for section in outline_sections if section[0] == 2]
+    assert [section[0] for section in outline_sections if section[0] <= 2] == [1, 2]
+
+    # --- Step 4: section_instructions ---
+    instructions = _load_stage(stages, 'section_instructions', SectionInstructionList)
+    assert len(instructions.instructions) == 1
+    instruction_ref = instructions.instructions[0].content_ref
+    assert instruction_ref.heading_path == outline_h2[0][1]
+
+    # --- Step 5: draft_block ---
+    draft_block = Path(_stage_path(stages, 'draft_block')).read_text(encoding='utf-8')
+    draft_block_sections = parse_markdown_sections(draft_block)
+    assert draft_block_sections[0][0] == 2
+    assert draft_block_sections[0][1][-1] == outline_h2[0][1][-1]
+    assert len(draft_block) >= 200
+
+    # --- Step 6: section_review ---
+    section_review = _load_stage(stages, 'section_review', ReviewReport)
+    assert 0 <= section_review.result.score <= 100
+
+    # --- Step 7: writing_context (updated) ---
+    assert context.meta.get('context_updates')
+
+    # --- Step 8: draft_document ---
+    draft_document = Path(_stage_path(stages, 'draft_document')).read_text(encoding='utf-8')
+    draft_sections = parse_markdown_sections(draft_document)
+    assert [section[0] for section in draft_sections[:2]] == [1, 2]
+    assert draft_block.strip() in draft_document
+
+    # --- Step 9: final_document ---
+    final_path = Path(_stage_path(stages, 'final_document'))
+    final_document = final_path.read_text(encoding='utf-8')
+    assert final_document == draft_document
+    assert all(term in final_document for term in ('Python', 'Kubernetes', 'SaaS'))
+
+    # --- Step 10: output_review ---
+    document_review = _load_stage(stages, 'draft_document_review', ReviewReport)
+    assert 0 <= document_review.result.score <= 100
+
+    # --- Step 11: write_result ---
+    write_result = _load_stage(stages, 'write_result')
+    assert write_result['doc_id'] == 'writer-markdown-e2e'
+    assert write_result['block_count'] > 0
+    write_fs.write_doc_blocks.assert_called_once()
+
+    # --- primary_result ---
+    primary = result.get('primary_result') or {}
+    assert Path(primary['artifact_path']) == final_path
 
 
 # ============================================================================
@@ -288,7 +424,10 @@ def test_revise_workflow_e2e():
                 'Do not change anything else.'
             ),
             task_type='revise',
-            selection=Selection(block_ids=['blk-lang-list', 'blk-deploy']),
+            selection=Selection(content_refs=[
+                ContentRef(node_id='blk-lang-list'),
+                ContentRef(node_id='blk-deploy'),
+            ]),
         ).model_dump(),
         document=document,
         context=context,
@@ -298,16 +437,17 @@ def test_revise_workflow_e2e():
 
     # --- locate ---
     locate = _load_stage(stages, 'locate_result', LocateResult)
-    assert locate.target_node_ids, 'locate must select at least one block.'
-    assert set(locate.target_node_ids) <= {'blk-lang-list', 'blk-deploy'}, (
-        f'locate must only pick blocks within selection, got {locate.target_node_ids}'
+    located_node_ids = [target.content_ref.node_id for target in locate.targets]
+    assert located_node_ids, 'locate must select at least one block.'
+    assert set(located_node_ids) <= {'blk-lang-list', 'blk-deploy'}, (
+        f'locate must only pick blocks within selection, got {located_node_ids}'
     )
-    for nid in locate.target_node_ids:
-        assert locate.target_reasons.get(nid, '').strip(), f'missing reason for selected block {nid}.'
+    for target in locate.targets:
+        assert target.reason.strip(), f'missing reason for selected block {target.content_ref.node_id}.'
 
     # --- modify_plan ---
     plan = _load_stage(stages, 'modify_plan', ModifyPlan)
-    assert {i.target_node_id for i in plan.instructions} == set(locate.target_node_ids)
+    assert {i.content_ref.node_id for i in plan.instructions} == set(located_node_ids)
     for instr in plan.instructions:
         assert instr.modify_type in {'create', 'update', 'delete', 'move'}
         assert instr.instruction.strip()
