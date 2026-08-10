@@ -128,7 +128,7 @@ class WriterDraftingTools(WriterToolBase):
                 stream_output={'_stream_sink': sink},
             ),
             normalize=lambda block: self._normalize_draft_block(block, instruction),
-            finalize=lambda block: self._save_ir_draft_section(block, result_extra),
+            finalize=lambda block: self._save_ir_draft_section(block, result_extra, media_assets),
             instruction=instruction,
             idle_timeout=self._draft_stream_idle_timeout(idle_timeout),
         )
@@ -186,7 +186,16 @@ class WriterDraftingTools(WriterToolBase):
         self,
         draft_block: WriterBlock,
         result_extra: Dict[str, Any],
+        media_assets: Any = None,
     ) -> dict:
+        library = self._unified_optional_model(media_assets, MediaAssetLibrary)
+        if library is not None:
+            for image_block in draft_block.iter_blocks():
+                if image_block.type == 'image':
+                    for ref in image_block.references or []:
+                        asset = library.assets.get(ref.get('id'))
+                        if asset is not None and asset.uri:
+                            ref.setdefault('path', asset.uri)
         result = self._save_artifacts(
             {'draft_block': draft_block},
             step_name='generate_draft_section',
@@ -330,7 +339,7 @@ class WriterDraftingTools(WriterToolBase):
             stage='draft',
             title=str(title) if title is not None else writing_outline.title if writing_outline else '',
             blocks=writer_blocks,
-            ui_editable=False,
+            ui_editable=True,
             metadata={
                 'source': 'generate_draft_document',
                 'context_id': context.context_id,
