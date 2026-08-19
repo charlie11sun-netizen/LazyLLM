@@ -336,8 +336,7 @@ class WriterPlanningTools(WriterToolBase):
             for reference in plan.references
             if isinstance(reference, dict) and reference.get('id') in valid_reference_ids
         ]
-        if not context.facts:
-            plan.fact_constraints = []
+        cls._normalize_fact_constraints(plan, bool(context.facts))
 
         representation = cls._resolve_representation(task, None)
         plan.meta.update({
@@ -862,8 +861,7 @@ class WriterPlanningTools(WriterToolBase):
             self._validate_instruction(instruction, '/'.join(heading_path))
             instruction.section_title = strip_heading_numbering(heading_path[-1])
             instruction.references = []
-            if not context.facts:
-                instruction.fact_constraints = []
+            self._normalize_fact_constraints(instruction, bool(context.facts))
             instruction.meta.update({
                 'representation': 'markdown',
                 'outline_heading_level': level,
@@ -1135,8 +1133,7 @@ class WriterPlanningTools(WriterToolBase):
                     occurrence=seen_titles[instruction.section_title],
                 )
             instruction.references = []
-            if not context.facts:
-                instruction.fact_constraints = []
+            cls._normalize_fact_constraints(instruction, bool(context.facts))
             instruction.meta.update({
                 'representation': representation,
                 'rewrite': True,
@@ -1248,8 +1245,7 @@ class WriterPlanningTools(WriterToolBase):
         instruction.content_ref.node_id = outline_node_id
         instruction.references = [dict(reference) for reference in block.references]
         instruction.visual_needs = []
-        if not has_available_facts:
-            instruction.fact_constraints = []
+        self._normalize_fact_constraints(instruction, has_available_facts)
         instruction.meta.update({
             'representation': 'ir',
             'outline_node_level': block.numbering.get('level'),
@@ -1292,3 +1288,11 @@ class WriterPlanningTools(WriterToolBase):
             raise ValueError(f'Section instruction for {target!r} has an empty instruction_id.')
         if not instruction.section_goal.strip():
             raise ValueError(f'Section instruction for {target!r} has an empty section_goal.')
+
+    @staticmethod
+    def _normalize_fact_constraints(
+        instruction: SectionInstruction | ShortWritingPlan,
+        has_available_facts: bool,
+    ) -> None:
+        if not has_available_facts:
+            instruction.fact_constraints = []
