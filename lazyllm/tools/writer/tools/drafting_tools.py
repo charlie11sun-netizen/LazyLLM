@@ -4,7 +4,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from .base import WriterToolBase
-from .stream_tools import DraftIRStream, DraftMarkdownStream
+from .stream_tools import DraftIRStream, DraftMarkdownStream, resolve_stream_idle_timeout
 from ..data_models.context import WritingContext
 from ..data_models.multimodal import MediaAssetLibrary, VisualPlan
 from ..data_models.task import WritingTask
@@ -31,6 +31,7 @@ from ..utils import (
     to_prompt_json,
     writer_document_to_markdown,
 )
+
 
 class WriterDraftingTools(WriterToolBase):
     __public_apis__ = [
@@ -102,7 +103,7 @@ class WriterDraftingTools(WriterToolBase):
         )
         heading = self._markdown_draft_heading(instruction)
         prefix = self._markdown_draft_prefix(instruction, heading)
-        timeout = self._draft_stream_idle_timeout(idle_timeout)
+        timeout = resolve_stream_idle_timeout(self.llm, idle_timeout)
         return DraftMarkdownStream(
             call=lambda sink: self._call_llm_text(
                 prompt,
@@ -163,7 +164,7 @@ class WriterDraftingTools(WriterToolBase):
                 media_assets,
             ),
             instruction=instruction,
-            idle_timeout=self._draft_stream_idle_timeout(idle_timeout),
+            idle_timeout=resolve_stream_idle_timeout(self.llm, idle_timeout),
         )
 
     def _generate_ir_draft_section(
@@ -429,17 +430,6 @@ class WriterDraftingTools(WriterToolBase):
             return f'<a id="block-{outline_node_id}"></a>\n{heading}\n\n'
         return f'{heading}\n\n'
 
-    def _draft_stream_idle_timeout(self, idle_timeout: Optional[float]) -> float:
-        value: Any = idle_timeout
-        if value is None:
-            value = getattr(self.llm, '_timeout', None)
-        if isinstance(value, (tuple, list)):
-            value = value[-1] if value else None
-        if value is None:
-            value = 180.0
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
-            raise ValueError('idle_timeout must be a positive number.')
-        return float(value)
 
     @staticmethod
     def _draft_result_extra(
@@ -767,7 +757,10 @@ class WriterDraftingTools(WriterToolBase):
         top_sections = [section for section in sections if section[0] <= 2]
         if len(top_sections) != 1 or top_sections[0][0] != 2:
             raise ValueError('Markdown draft section must contain exactly one H2 root heading.')
-        if top_sections[0][1][-1] != strip_heading_numbering(instruction.content_ref.heading_path[-1]):
+        if (
+            strip_heading_numbering(top_sections[0][1][-1])
+            != strip_heading_numbering(instruction.content_ref.heading_path[-1])
+        ):
             raise ValueError('Markdown draft section heading does not match its content_ref.')
 
     @staticmethod
@@ -808,7 +801,7 @@ class WriterDraftingTools(WriterToolBase):
         return draft_block
 
     @staticmethod
-    def _normalize_ir_cross_references(
+    def _normalize_ir_cross_references(  # noqa: C901
         draft_block: WriterBlock,
         instruction: SectionInstruction,
         *,
@@ -867,7 +860,7 @@ class WriterDraftingTools(WriterToolBase):
             raise ValueError(f'Missing required cross-references: {missing!r}.')
 
     @classmethod
-    def _normalize_markdown_cross_references(
+    def _normalize_markdown_cross_references(  # noqa: C901
         cls,
         body: str,
         instruction: SectionInstruction,
@@ -948,6 +941,23 @@ class WriterDraftingTools(WriterToolBase):
                 found_targets.add(target)
                 reference_lines[target] = fallback_reference_line
 
+        # A model may produce an otherwise complete section while omitting a
+        # planned required link. Preserve the strict plan boundary (unplanned
+        # links still fail above), but deterministically materialize required
+        # planned links instead of discarding the completed section.
+        for item in references:
+            target = str(item.get('target'))
+            if not item.get('required', True) or target in found_targets:
+                continue
+            if fallback_reference_line is None:
+                fallback_reference_line = cls._markdown_reference_fallback_line(output)
+            output[fallback_reference_line] = (
+                f'{output[fallback_reference_line].rstrip()} '
+                f'[{cls._markdown_reference_text(item, target)}](#block-{target})'
+            )
+            found_targets.add(target)
+            reference_lines[target] = fallback_reference_line
+
         missing = [
             str(item.get('target')) for item in references
             if item.get('required', True)
@@ -996,7 +1006,7 @@ class WriterDraftingTools(WriterToolBase):
         ).strip())
 
     @classmethod
-    def _markdown_reference_fallback_line(cls, lines: List[str]) -> int:
+    def _markdown_reference_fallback_line(cls, lines: List[str]) -> int:  # noqa: C901
         paragraph_end: int | None = None
         first_content: int | None = None
         fence: str | None = None
