@@ -154,7 +154,7 @@ class WriterDraftingTools(WriterToolBase):
                 short_visuals,
             ),
             prefix=prefix,
-            idle_timeout=self._draft_stream_idle_timeout(idle_timeout),
+            idle_timeout=resolve_stream_idle_timeout(self.llm, idle_timeout),
             label='Short document Markdown',
         )
 
@@ -222,7 +222,7 @@ class WriterDraftingTools(WriterToolBase):
             ),
             normalize=normalize,
             finalize=finalize,
-            idle_timeout=self._draft_stream_idle_timeout(idle_timeout),
+            idle_timeout=resolve_stream_idle_timeout(self.llm, idle_timeout),
             preview_title=plan.section_title,
         )
 
