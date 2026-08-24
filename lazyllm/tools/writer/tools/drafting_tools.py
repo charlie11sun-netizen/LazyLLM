@@ -140,18 +140,23 @@ class WriterDraftingTools(WriterToolBase):
         short_visuals = self._short_document_visuals(visual_plan, media_assets)
         prompt = self._short_document_prompt(writing_task, plan, writing_context, short_visuals)
         prefix = f'# {strip_heading_numbering(plan.section_title.strip())}\n\n'
-        return DraftMarkdownStream(
-            call=lambda sink: self._call_llm_text(
-                prompt,
-                stream_output={'_stream_sink': sink},
-            ),
-            finalize=lambda body: self._finalize_short_markdown_document(
+
+        def finalize(body: str) -> dict:
+            body = self._condense_short_markdown_if_needed(body, writing_task, plan)
+            return self._finalize_short_markdown_document(
                 body,
                 writing_task,
                 plan,
                 writing_context,
                 short_visuals,
+            )
+
+        return DraftMarkdownStream(
+            call=lambda sink: self._call_llm_text(
+                prompt,
+                stream_output={'_stream_sink': sink},
             ),
+            finalize=finalize,
             prefix=prefix,
             idle_timeout=resolve_stream_idle_timeout(self.llm, idle_timeout),
             label='Short document Markdown',

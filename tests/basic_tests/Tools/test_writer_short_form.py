@@ -170,6 +170,36 @@ def test_stream_short_document(representation, tmp_path):
     assert result['metadata']['extra']['representation'] == representation
 
 
+def test_stream_short_markdown_document_condenses_oversized_body(tmp_path):
+    task, context, plan = _short_inputs()
+    task.constraints['max_chars'] = 6
+    plan.meta['max_chars'] = 6
+    original = '这是一段超出限制的初稿。'
+    condensed = '精简正文。'
+
+    def stream_then_condense(prompt, stream_output=False):
+        if stream_output:
+            stream_output['_stream_sink']({'tag': 'text', 'delta': original})
+            return original
+        assert original in prompt
+        return condensed
+
+    tool = WriterDraftingTools(artifact_store=str(tmp_path))
+    with (
+        patch.object(tool, '_call_llm_text', side_effect=stream_then_condense) as mocked,
+        tool.stream_short_document(task, plan, context, idle_timeout=1) as stream,
+    ):
+        preview = ''.join(stream)
+        result = stream.result()
+
+    assert preview == f'# {_TITLE}\n\n{original}\n'
+    assert Path(result['artifact_path']).read_text(encoding='utf-8') == (
+        f'# {_TITLE}\n\n{condensed}\n'
+    )
+    assert result['metadata']['counts']['body_characters'] == 5
+    assert mocked.call_count == 2
+
+
 @pytest.mark.parametrize(
     ('model_has_image', 'local_path', 'expected_path'),
     [
