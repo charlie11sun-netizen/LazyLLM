@@ -23,7 +23,7 @@ LazyLLM致力于敏捷与效率的统一，开发者可以高效的迭代算法�
 <img src="https://github.com/user-attachments/assets/7a042a97-1339-459e-a451-4bcd6cf64c12" width=250/>
 </p>
 
-## 二、特性
+## 二、修改检查
 
 **便捷的AI应用组装流程**：即使您不了解大模型，您仍然可以像搭积木一样，借助我们内置的数据流和功能模块，轻松组建包含多个Agent的AI应用。<br>
 
@@ -64,7 +64,7 @@ lazyllm.WebModule(chat, port=23466).start().wait()
 
 **这是一个带多模态和意图识别的高级机器人示例。**
 
-![Demo Multimodal bot](docs/assets/multimodal-bot.svg)
+![Demo Multimodal bot](/static-files/docs/assets/multimodal-bot.svg?expires=1788233562&sig=40999170895cbcf8cadd0bdcd488d4b004859e4ed84ddf42433ebbc49b789968)
 
 <details>
 <summary>点击获取import和prompt</summary>
@@ -92,7 +92,7 @@ WebModule(ic, history=[base], audio=True, port=8847).start().wait()
 
 ### 3.2 检索增强生成
 
-![Demo RAG](docs/assets/demo_rag.svg)
+![Demo RAG](/static-files/docs/assets/demo_rag.svg?expires=1788233562&sig=a22cbb0931524232893f0001df576d3136c737ca4f6e69f8fc0b759e03460bcf)
 
 <details>
 <summary>点击获取import和prompt</summary>
