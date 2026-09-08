@@ -19,11 +19,11 @@ LazyLLM致力于敏捷与效率的统一，开发者可以高效的迭代算法�
 
 微信扫描下方二维码加入交流群(左)或通过观看视频了解更多(右)<br>
 <p align="center">
-<img src="https://github.com/user-attachments/assets/8ad8fd14-b218-48b3-80a4-7334b2a32c5a" width=250/>
-<img src="https://github.com/user-attachments/assets/7a042a97-1339-459e-a451-4bcd6cf64c12" width=250/>
+<img src="assets/91/91858fe1254671da63ac659dd299e3bc20683cedab6f111b5ff811084ad9ee2f.png" width=250/>
+<img src="assets/62/6269217590083be2def15a0b9d74256bd789e21f7974758495797b4936052d84.jpg" width=250/>
 </p>
 
-## 二、特性
+## 二、修改检查
 
 **便捷的AI应用组装流程**：即使您不了解大模型，您仍然可以像搭积木一样，借助我们内置的数据流和功能模块，轻松组建包含多个Agent的AI应用。<br>
 
