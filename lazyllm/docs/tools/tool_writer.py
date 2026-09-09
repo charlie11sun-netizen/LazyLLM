@@ -396,3 +396,26 @@ add_writer_serialization_chinese_doc('MarkdownSelectionError', '''
 add_writer_serialization_english_doc('MarkdownSelectionError', '''
 Indicate that a Markdown selection cannot be located uniquely and safely.
 ''')
+
+
+_writer_provider_module = importlib.import_module('lazyllm.tools.writer.provider')
+utils.add_chinese_doc('WriterProviderBase.convert_document', '''
+将 WriterDocument 或 Markdown 转换为指定格式，不执行外部 IO。
+output_format 默认为 native，保留当前 Provider 的写回格式；markdown、latex、text
+使用共享转换器，返回 provider 为空的通用内容。LaTeX 返回正文片段，图片保留资源引用。
+复制和写回由调用方分别执行，通用转换结果不能传入平台 write_document。
+''', module=_writer_provider_module)
+utils.add_english_doc('WriterProviderBase.convert_document', '''
+Convert WriterDocument or Markdown without external IO. output_format defaults to native,
+which preserves the current provider write format. markdown, latex and text use the shared
+converter and return portable content with an empty provider. LaTeX is a body fragment;
+images retain resource locators. Portable results cannot be passed to provider write_document.
+''', module=_writer_provider_module)
+utils.add_chinese_doc('WriterProviderBase.convert_common_document', '''
+无需平台实例即可转换 Markdown 或 WriterDocument。显式指定 output_format 为
+markdown、latex 或 text；返回 WriterProviderDocument，不写文件或访问平台。
+''', module=_writer_provider_module)
+utils.add_english_doc('WriterProviderBase.convert_common_document', '''
+Convert Markdown or WriterDocument without a platform instance. Specify output_format as
+markdown, latex or text. Returns WriterProviderDocument without file writes or platform IO.
+''', module=_writer_provider_module)

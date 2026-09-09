@@ -15,6 +15,8 @@ from ..data_models.multimodal import MediaAssetLibrary
 from ..data_models.revision import PatchSet
 from ..data_models.task import InputResource, TargetDocument
 from ..data_models.writer_ir import WriterDocument, WriterStage
+from ..utils.conversion import writer_document_from_markdown
+from ..utils.export import export_writer_document
 
 
 WriterProviderCapability = Literal[
@@ -226,15 +228,55 @@ class WriterProviderBase(ABC):
         visit(value)
         return value
 
-    @abstractmethod
     def convert_document(
         self,
         content: WriterDocument | str,
         *,
         target: TargetDocument | None = None,
         media_assets: MediaAssetLibrary | None = None,
+        output_format: str = 'native',
     ) -> WriterProviderDocument:
-        '''Convert Writer content to provider format without external IO.'''
+        if output_format != 'native':
+            return self.convert_common_document(content, output_format=output_format, media_assets=media_assets)
+        return self._convert_native_document(content, target=target, media_assets=media_assets)
+
+    @classmethod
+    def convert_common_document(
+        cls,
+        content: WriterDocument | str,
+        *,
+        output_format: str,
+        media_assets: MediaAssetLibrary | None = None,
+    ) -> WriterProviderDocument:
+        document = (writer_document_from_markdown(content) if isinstance(content, str)
+                    else content.model_copy(deep=True))
+        if media_assets:
+            for block in document.iter_blocks():
+                for reference in block.references:
+                    asset = media_assets.assets.get(reference.get('id'))
+                    if asset and (asset.uri or asset.local_path):
+                        reference.setdefault('path', str(asset.uri or asset.local_path))
+        return WriterProviderDocument(
+            provider='',
+            format=output_format,
+            content=export_writer_document(
+                document, output_format, markdown_source=content if isinstance(content, str) else None,
+            ),
+            source_document=document,
+            media_references={
+                key: str(asset.uri or asset.local_path or '')
+                for key, asset in (media_assets.assets.items() if media_assets else [])
+                if asset.uri or asset.local_path
+            },
+        )
+
+    def _convert_native_document(
+        self,
+        content: WriterDocument | str,
+        *,
+        target: TargetDocument | None = None,
+        media_assets: MediaAssetLibrary | None = None,
+    ) -> WriterProviderDocument:
         raise NotImplementedError
 
     @abstractmethod

@@ -514,6 +514,10 @@ def _render_styled_text(value: str, span: Optional[WriterSpan]) -> str:
     if span is None:
         return result
     style = _span_style(span)
+    if style.get('math_source'):
+        return value
+    if style.get('notion:rich_text_type') == 'equation':
+        return f'${value}$'
     if style.get('inline_code') or style.get('code'):
         result = _inline_code(value)
     if style.get('strong') or style.get('bold'):

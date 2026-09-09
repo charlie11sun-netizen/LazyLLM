@@ -135,7 +135,7 @@ class NotionWriterProvider(WriterProviderBase):
             },
         )
 
-    def convert_document(
+    def _convert_native_document(
         self,
         content: WriterDocument | str,
         *,

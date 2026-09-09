@@ -204,7 +204,7 @@ class FeishuWriterProvider(WriterProviderBase):
             raise TypeError(f'{type(fs).__name__} does not support Feishu media downloads.')
         return download_media(token)
 
-    def convert_document(
+    def _convert_native_document(
         self,
         content: WriterDocument | str,
         *,
