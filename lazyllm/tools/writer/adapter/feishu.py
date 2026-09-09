@@ -3,7 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 
 from ..utils.feishu_docx import DOCX_BLOCK_TYPE_FIELDS, prepare_docx_descendants
 from ..utils import strip_caption_numbering, strip_heading_numbering
@@ -234,6 +234,35 @@ class FeishuWriterAdapter(WriterAdapterBase):
             else:
                 raw.pop('parent_id', None)
             output.append(raw)
+        return output
+
+    @staticmethod
+    def materialize_internal_links(
+        blocks: List[NativeBlock], *, document_uri: str, document_id: str,
+    ) -> List[NativeBlock]:
+        output = deepcopy(blocks)
+        temporary_ids = {
+            str(block.get('block_id') or '')
+            for block in output
+            if isinstance(block, dict) and block.get('block_id')
+        }
+
+        def visit(value: Any) -> None:
+            if isinstance(value, list):
+                for item in value:
+                    visit(item)
+                return
+            if not isinstance(value, dict):
+                return
+            link = value.get('link')
+            url = link.get('url') if isinstance(link, dict) else None
+            fragment = urlparse(url).fragment if isinstance(url, str) else ''
+            if fragment in temporary_ids:
+                link['url'] = feishu_block_url(document_uri, document_id, fragment)
+            for item in value.values():
+                visit(item)
+
+        visit(output)
         return output
 
     def patch_to_operation(
@@ -719,19 +748,21 @@ class FeishuWriterAdapter(WriterAdapterBase):
             raise ValueError('A new image block requires exactly one media_asset reference.')
         asset_id = str(references[0]['id'])
         asset = media_assets.assets.get(asset_id) if media_assets else None
-        if asset is None or not asset.local_path or not Path(asset.local_path).is_file():
+        local_path = Path(asset.local_path) if asset and asset.local_path else None
+        if asset is None or (not asset.uri and (local_path is None or not local_path.is_file())):
             raise ValueError(f'Image media asset {asset_id!r} is unavailable.')
+        media = {'media_asset_id': asset_id}
+        if asset.uri:
+            media['uri'] = asset.uri
+        if local_path is not None and local_path.is_file():
+            media.update(local_path=str(local_path), file_name=local_path.name)
         return {
             'block_type': 27,
             'image': {
                 'align': 2,
                 'caption': {'content': block.content},
             },
-            '_media': {
-                'media_asset_id': asset_id,
-                'local_path': asset.local_path,
-                'file_name': Path(asset.local_path).name,
-            },
+            '_media': media,
         }
 
     def _block_type_from_ir(self, block: WriterBlock, original_type: Any) -> int:

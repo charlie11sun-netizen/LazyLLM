@@ -7,7 +7,13 @@ from typing import Any, List, Optional, Tuple
 
 from lazyllm import LOG
 
-from .base import WriterProviderBase
+from .base import (
+    WriterProviderBase,
+    WriterProviderCapabilities,
+    WriterProviderDocument,
+    WriterProviderRevisionError,
+    WriterProviderWriteMode,
+)
 from ..adapter.base import NativePatchOperation, WriterAdapterBase
 from ..adapter.notion import NotionWriterAdapter
 from ..data_models.multimodal import MediaAssetLibrary
@@ -16,7 +22,6 @@ from ..data_models.task import TargetDocument
 from ..data_models.writer_ir import WriterDocument, WriterStage
 from ..numbering import build_numbering_view_from_ir, compute_numbering, materialize_ir
 from ..tools.revision_tools import apply_patch_to_ir
-from ..utils import parse_document_markdown
 
 
 _NOTION_URL_RE = re.compile(
@@ -29,6 +34,15 @@ class NotionWriterProvider(WriterProviderBase):
     '''Orchestrate structured Notion page IO through NotionFS and Writer IR.'''
 
     provider = 'notion'
+    capabilities = WriterProviderCapabilities(
+        load=True,
+        create=True,
+        replace=True,
+        append=True,
+        patch=True,
+        revision_check=True,
+        media=True,
+    )
 
     @classmethod
     def matches(cls, locator: str) -> bool:
@@ -121,23 +135,40 @@ class NotionWriterProvider(WriterProviderBase):
             },
         )
 
-    def replace_document(
+    def convert_document(
         self,
         content: WriterDocument | str,
-        target: TargetDocument,
         *,
+        target: TargetDocument | None = None,
         media_assets: MediaAssetLibrary | None = None,
-    ) -> dict:
-        return self._write_document(content, target, media_assets=media_assets, mode='replace')
-
-    def append_document(
-        self,
-        content: WriterDocument | str,
-        target: TargetDocument,
-        *,
-        media_assets: MediaAssetLibrary | None = None,
-    ) -> dict:
-        return self._write_document(content, target, media_assets=media_assets, mode='append')
+    ) -> WriterProviderDocument:
+        source_document = self._writer_document(content, media_assets)
+        document = source_document.model_copy(deep=True)
+        if target is not None:
+            if target.adapter and target.adapter != self.provider:
+                raise ValueError(
+                    f'target adapter {target.adapter!r} does not match provider {self.provider!r}.')
+            document.provider_binding = {
+                **document.provider_binding,
+                'provider': self.provider,
+                'document_id': str(target.doc_id or ''),
+                'uri': str(target.uri or ''),
+            }
+        adapter = self._writer_adapter()
+        numbering = compute_numbering(build_numbering_view_from_ir(document))
+        document = materialize_ir(document, numbering)
+        native_blocks = adapter.ir_to_blocks(document, media_assets=media_assets)
+        return WriterProviderDocument(
+            provider=self.provider,
+            format='notion_blocks',
+            content=self._copyable_media_content(native_blocks, media_assets),
+            source_document=source_document,
+            media_references={
+                asset_id: str(asset.uri or asset.local_path or '')
+                for asset_id, asset in (media_assets.assets.items() if media_assets else [])
+                if asset.uri or asset.local_path
+            },
+        )
 
     def apply_patch_to_document(
         self,
@@ -164,9 +195,9 @@ class NotionWriterProvider(WriterProviderBase):
         baseline = self._document_metadata(fs, real_path)
         current_revision = str(baseline.get('last_edited_time') or '') or None
         if source_document.revision and current_revision != source_document.revision:
-            raise RuntimeError(
-                f'Notion document changed since it was loaded: expected '
-                f'{source_document.revision!r}, got {current_revision!r}.')
+            raise WriterProviderRevisionError(
+                self.provider, source_document.revision, current_revision,
+            )
 
         persisted = source_document
         applied_hunks: List[str] = []
@@ -314,39 +345,36 @@ class NotionWriterProvider(WriterProviderBase):
                 values.append(text['content'])
         return ''.join(values)
 
-    def _write_document(
+    def write_document(
         self,
-        content: WriterDocument | str,
+        converted: WriterProviderDocument,
         target: TargetDocument,
         *,
-        media_assets: MediaAssetLibrary | None,
-        mode: str,
+        media_assets: MediaAssetLibrary | None = None,
+        mode: WriterProviderWriteMode = 'replace',
     ) -> dict:
-        source_document = content if isinstance(content, WriterDocument) else None
-        protocol, _, fs, adapter, locator, document_id = \
+        if converted.provider != self.provider or converted.format != 'notion_blocks':
+            raise ValueError('Notion write_document requires converted Notion blocks.')
+        source_document = converted.source_document.model_copy(deep=True)
+        protocol, _, fs, _, locator, document_id = \
             self._resolve_document_target(target, source_document=source_document)
-        document = source_document.model_copy(deep=True) if source_document else \
-            parse_document_markdown(
-            content,
-            document_id=adapter.make_document_id(document_id),
-            stage='final',
-            media_assets=media_assets,
-        )
-        document.provider_binding = {
-            **(document.provider_binding or {}),
+        source_document.provider_binding = {
+            **source_document.provider_binding,
             'provider': protocol,
             'document_id': document_id,
             'uri': locator,
         }
-        self._validate_available_images(document, media_assets, adapter)
-        numbering = compute_numbering(build_numbering_view_from_ir(document))
-        document = materialize_ir(document, numbering)
-        native_blocks = adapter.ir_to_blocks(document, media_assets=media_assets)
-        if document.title:
+        converted_content = self._writer_adapter().materialize_internal_links(
+            converted.content, document_uri=locator, document_id=document_id,
+        )
+        native_blocks = self._writable_media_content(converted_content, media_assets)
+        if not isinstance(native_blocks, list):
+            raise TypeError('Converted Notion content must be a block list.')
+        if source_document.title:
             update_title = getattr(fs, 'update_page_title', None)
             if not callable(update_title):
                 raise TypeError(f'{type(fs).__name__} does not support update_page_title().')
-            update_title(document_id, document.title)
+            update_title(document_id, source_document.title)
         method_name = 'replace_doc_blocks' if mode == 'replace' else 'write_doc_blocks'
         write_blocks = getattr(fs, method_name, None)
         if not callable(write_blocks):

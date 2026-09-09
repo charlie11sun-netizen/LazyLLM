@@ -153,6 +153,30 @@ class NotionWriterAdapter(WriterAdapterBase):
             track_internal_refs=track_internal_refs,
         )
 
+    @classmethod
+    def materialize_internal_links(
+        cls, blocks: List[NativeBlock], *, document_uri: str, document_id: str,
+    ) -> List[NativeBlock]:
+        output = deepcopy(blocks)
+        target_url = cls._notion_block_url(document_uri, document_id, document_id)
+
+        def visit(value: Any) -> None:
+            if isinstance(value, list):
+                for item in value:
+                    visit(item)
+                return
+            if not isinstance(value, dict):
+                return
+            text = value.get('text')
+            link = text.get('link') if isinstance(text, dict) else None
+            if isinstance(link, dict) and link.get('_target_node_id'):
+                link['url'] = target_url
+            for item in value.values():
+                visit(item)
+
+        visit(output)
+        return output
+
     def _ir_blocks_to_raw(self, blocks: List[WriterBlock], resolve_internal_ref: Any, *,
                           media_library: Optional[MediaAssetLibrary] = None,
                           track_internal_refs: bool = False) -> List[NativeBlock]:
@@ -276,16 +300,20 @@ class NotionWriterAdapter(WriterAdapterBase):
                 raise ValueError('A Notion image requires exactly one media_asset reference.')
             asset_id = str(references[0]['id'])
             asset = media_library.assets.get(asset_id) if media_library else None
-            if asset is None or not asset.local_path or not Path(asset.local_path).is_file():
+            local_path = Path(asset.local_path) if asset and asset.local_path else None
+            if asset is None or (not asset.uri and (local_path is None or not local_path.is_file())):
                 raise ValueError(f'Image media asset {asset_id!r} is unavailable.')
             image = output.setdefault('image', {})
             for field in ('external', 'file', 'file_upload', 'type'):
                 image.pop(field, None)
-            output['_media'] = {
-                'media_asset_id': asset_id,
-                'local_path': asset.local_path,
-                'file_name': Path(asset.local_path).name,
-            }
+            if asset.uri:
+                image.update(type='external', external={'url': asset.uri})
+            media = {'media_asset_id': asset_id}
+            if asset.uri:
+                media['uri'] = asset.uri
+            if local_path is not None and local_path.is_file():
+                media.update(local_path=str(local_path), file_name=local_path.name)
+            output['_media'] = media
 
     @staticmethod
     def _raw_payload(block: WriterBlock) -> NativeBlock:

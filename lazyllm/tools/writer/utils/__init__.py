@@ -34,6 +34,7 @@ from .conversion import (
     writer_document_to_markdown,
 )
 from .request_constraints import parse_writer_request_constraints
+from .editing import set_document_editable
 
 __all__ = [
     'SCHEMA_VERSION',
@@ -66,4 +67,5 @@ __all__ = [
     'strip_heading_numbering',
     'strip_caption_numbering',
     'parse_writer_request_constraints',
+    'set_document_editable',
 ]
