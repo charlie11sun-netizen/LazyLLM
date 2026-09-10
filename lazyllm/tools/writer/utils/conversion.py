@@ -17,11 +17,12 @@ from ..numbering import (
     parse_markdown_heading_numbering_config,
     strip_markdown_heading_numbering_config,
 )
+from .pandoc import markdown_to_latex
 from .artifact import deserialize_artifact_json, serialize_artifact_json
 
 
 WriterSourceFormat = Literal['markdown', 'lmd', 'writer_document']
-WriterTargetFormat = Literal['markdown', 'lmd']
+WriterTargetFormat = Literal['markdown', 'lmd', 'latex']
 
 
 @dataclass
@@ -790,11 +791,21 @@ def convert_writer_content(
     target_format: WriterTargetFormat,
     *,
     document_id: str = 'writer-document',
+    language: str = 'zh-CN',
+    materialized_numbering: bool = True,
 ) -> str:
     if source_format not in {'markdown', 'lmd', 'writer_document'}:
         raise ValueError(f'Unsupported Writer source format: {source_format!r}.')
-    if target_format not in {'markdown', 'lmd'}:
+    if target_format not in {'markdown', 'lmd', 'latex'}:
         raise ValueError(f'Unsupported Writer target format: {target_format!r}.')
+    if target_format == 'latex':
+        if source_format != 'markdown':
+            raise ValueError('LaTeX conversion only supports Markdown source content.')
+        return markdown_to_latex(
+            content,
+            language=language,
+            materialized_numbering=materialized_numbering,
+        )
     if source_format == target_format:
         return content
     if source_format == 'markdown':

@@ -1580,7 +1580,7 @@ def test_markdown_draft_receives_its_planned_visual_references():
         markdown = Path(result['artifact_path']).read_text(encoding='utf-8')
 
     prompt = mocked.call_args.args[0]
-    assert 'Do not output image markup' in prompt
+    assert 'Do not output new image markup' in prompt
     assert 'IMAGE-1' in prompt
     assert '关键关系' in prompt
     assert '"required": true' in prompt

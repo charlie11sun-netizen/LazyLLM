@@ -20,6 +20,21 @@ def register_writer_provider(provider_class: Type[WriterProviderBase]) -> None:
     _PROVIDERS[key] = provider_class
 
 
+def list_writer_providers() -> list[dict[str, Any]]:
+    """Return registered providers and their declared capabilities."""
+    return [
+        {
+            'id': provider_id,
+            'capabilities': [
+                name
+                for name, enabled in provider_class.capabilities.model_dump().items()
+                if enabled
+            ],
+        }
+        for provider_id, provider_class in sorted(_PROVIDERS.items())
+    ]
+
+
 def get_writer_provider(provider: str, **kwargs: Any) -> WriterProviderBase:
     key = str(provider or '').strip().lower()
     provider_class = _PROVIDERS.get(key)
@@ -66,6 +81,7 @@ def resolve_writer_create_target(locator: str, **kwargs: Any) -> Any:
 
 __all__ = [
     'get_writer_provider',
+    'list_writer_providers',
     'match_writer_provider',
     'register_writer_provider',
     'resolve_writer_create_target',

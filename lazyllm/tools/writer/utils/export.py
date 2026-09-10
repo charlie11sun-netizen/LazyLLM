@@ -11,7 +11,7 @@ from ..numbering import (
     MARKDOWN_ANCHOR_RE, build_numbering_view_from_markdown, compute_numbering, materialize_markdown,
     strip_markdown_heading_numbering_config,
 )
-from .conversion import render_document_markdown
+from .conversion import convert_writer_content, render_document_markdown
 
 
 _TEX_ESCAPES = {
@@ -185,5 +185,7 @@ def export_writer_document(
     markdown = strip_markdown_heading_numbering_config(materialize_markdown(markdown, view, compute_numbering(view)))
     if output_format == 'markdown':
         return _copyable_markdown(markdown)
+    if output_format == 'latex':
+        return convert_writer_content(markdown, 'markdown', 'latex')
     parser = mistune.create_markdown(renderer='ast', plugins=['table', 'strikethrough', 'math', 'task_lists'])
     return _render_tokens(parser(markdown), output_format).strip() + '\n'
