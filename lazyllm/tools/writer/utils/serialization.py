@@ -127,6 +127,20 @@ def locate_markdown_paragraph(
     return matches[0]
 
 
+def locate_markdown_fragment(markdown: str, locator_text: str) -> str:
+    if not locator_text or markdown.find(locator_text) < 0 \
+            or markdown.find(locator_text) != markdown.rfind(locator_text):
+        raise ValueError('Markdown fragment must match exactly once in its referenced section.')
+    paragraph = locate_markdown_paragraph(markdown, locator_text)
+    start = paragraph.index(locator_text)
+    # Leave uncertain inline boundaries to the model instead of cutting through markup.
+    complete_inline = r'`[^`\n]+`|\*\*[^*]+\*\*|__[^_]+__|\*[^*]+\*|_[^_]+_|~~[^~]+~~|!?\[[^\[\]]*\]\([^()]*\)'
+    for surrounding in (paragraph[:start], paragraph[start + len(locator_text):]):
+        if re.search(r'[\\`*_~<>\[\]]', re.sub(complete_inline, '', surrounding)):
+            raise ValueError('Markdown fragment has uncertain inline markup boundaries.')
+    return locator_text
+
+
 def validate_markdown_paragraph(markdown: str) -> str:
     candidate = (markdown or '').strip()
     parser = mistune.create_markdown(renderer='ast', plugins=['table'])
