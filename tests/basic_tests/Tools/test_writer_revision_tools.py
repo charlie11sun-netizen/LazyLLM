@@ -24,7 +24,11 @@ from lazyllm.tools.writer.data_models import (
 from lazyllm.tools.writer.data_models.multimodal import VisualInstruction
 from lazyllm.tools.writer.data_models.revision import GeneratedRevision, RevisionBlockContent
 from lazyllm.tools.writer.utils import load_artifact_json
-from lazyllm.tools.writer.tools.revision_tools import WriterRevisionTools, apply_patch_to_ir
+from lazyllm.tools.writer.tools.revision_tools import (
+    WriterRevisionTools,
+    apply_patch_to_ir,
+    apply_persisted_patch_hunk,
+)
 
 
 def _block(node_id, content, *, children=None, style=None):
@@ -257,13 +261,16 @@ def test_apply_patch_supports_image_create_and_delete(tmp_path):
     assert deleted.block_by_id('image-existing') is None
 
 
-def test_apply_patch_rejects_image_update_and_move():
+def test_image_update_policy_distinguishes_user_patch_from_persisted_sync():
+    image = _image_block('image-existing', content='图 1 原说明')
+    image.provider_binding = {'provider': 'notion', 'block_id': 'image-block'}
+    image.provider_payload = {'raw_block': {'type': 'image'}}
     source = WriterDocument(
         document_id='doc-1',
         stage='final',
-        blocks=[_block('anchor', '锚点'), _image_block('image-existing')],
+        blocks=[_block('anchor', '锚点'), image],
     )
-    updated_image = _image_block('image-existing', content='新说明')
+    updated_image = _image_block('image-existing', content='图 2 原说明')
     update_patch = PatchSet(
         target_doc_id='doc-1',
         hunks=[PatchHunk(
@@ -274,6 +281,15 @@ def test_apply_patch_rejects_image_update_and_move():
     )
     with pytest.raises(ValueError, match='cannot be updated or moved'):
         apply_patch_to_ir(source, update_patch)
+
+    persisted = apply_persisted_patch_hunk(source, update_patch.hunks[0])
+    persisted_image = persisted.block_by_id(image.node_id)
+    assert persisted_image.content == '图 2 原说明'
+    assert (
+        persisted_image.provider_binding,
+        persisted_image.provider_payload,
+        persisted_image.editable,
+    ) == (image.provider_binding, image.provider_payload, False)
 
     move_patch = PatchSet(
         target_doc_id='doc-1',
@@ -744,6 +760,46 @@ def test_markdown_replace_rejects_partial_image_old_string():
 
     with pytest.raises(ValueError, match='complete image line'):
         WriterRevisionTools()._validate_string_replace_images(replace_set, markdown)
+
+
+@pytest.mark.parametrize('bad_image', [
+    '![diagram](docs/assets/invented.png)',
+    '<img src="docs/assets/invented.png">',
+    '![diagram][new]\n\n[new]: docs/assets/invented.png',
+    '![diagram](media-placeholder://wrong-need)',
+    '',
+])
+def test_markdown_revision_retries_invalid_new_images_once(tmp_path, bad_image):
+    ref = ContentRef(document_root=True)
+    plan = ModifyPlan(scope='document', instructions=[ModifyInstruction(
+        instruction_id='new-diagram', content_ref=ref, modify_type='create', position='after',
+        instruction='Add section and image.', visual_instruction=VisualInstruction(
+            need_id='new-diagram', content_ref=ref, visual_type='diagram', purpose='Architecture', required=True,
+        ),
+    )])
+    source = '# Title\n\nKeep ![old](existing.png)\n\nEnd.'
+
+    def result(image):
+        return StringReplaceSet(replacements=[StringReplace(
+            old_string='End.', new_string='End.\n\n## New section\n\n' + image,
+        )])
+
+    valid = result('![diagram](media-placeholder://new-diagram)')
+    tool = WriterRevisionTools(llm=MagicMock(), artifact_store=str(tmp_path))
+    with patch.object(tool, '_call_llm_structured', side_effect=[result(bad_image), valid]) as model:
+        tool.generate_string_replace_set(source, plan, WritingContext(context_id='image-check'))
+        assert model.call_count == 2
+        assert 'Invalid revision images' in model.call_args.args[0]
+    with patch.object(tool, '_call_llm_structured', return_value=result(bad_image)) as model:
+        with pytest.raises(ValueError, match='Invalid revision images'):
+            tool.generate_string_replace_set(source, plan, WritingContext(context_id='image-check'))
+        assert model.call_count == 2
+
+
+def test_markdown_image_sources_ignore_code_and_parse_reference_images():
+    from lazyllm.tools.writer.utils.serialization import markdown_image_sources
+    source = '![real][ref]\n\n[ref]: images/a(b).png\n\n`![code](fake.png)`\n\n```md\n![code](fake2.png)\n```'
+    assert markdown_image_sources(source) == {'images/a(b).png'}
 
 
 def test_apply_string_replace_updates_markdown_section():

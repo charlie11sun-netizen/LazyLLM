@@ -19,6 +19,7 @@ from ..numbering import (
 from .pandoc import markdown_to_latex
 from .artifact import deserialize_artifact_json, serialize_artifact_json
 from .markdown_inline import MarkdownInlineContent, parse_markdown_inline
+from .markdown_ids import markdown_anchor_ids, next_markdown_node_id
 from .tables import table_grid
 
 
@@ -108,16 +109,20 @@ class _MarkdownParser:
         self.title = ''
         self.emitted = False
         self.parser = mistune.create_markdown(
-            renderer='ast', plugins=['table', 'strikethrough'],
+            renderer='ast', plugins=['table', 'strikethrough', 'math'],
         )
+        self.tokens = self.parser(self.parser_markdown)
+        self.reserved_ids = markdown_anchor_ids(self.tokens)
 
     def next_id(self, block_type: str) -> str:
         if self.pending_anchor_ids:
             candidate = self.pending_anchor_ids.pop(0)
         else:
-            self.sequence += 1
             safe_type = re.sub(r'[^a-zA-Z0-9_-]+', '-', block_type).strip('-') or 'block'
-            candidate = f'{self.document_id}-{safe_type}-{self.sequence}'
+            candidate, self.sequence = next_markdown_node_id(
+                self.document_id, safe_type, self.sequence, self.reserved_ids, self.used_ids,
+            )
+            return candidate
         if candidate in self.used_ids:
             raise ValueError(f'duplicate Markdown anchor target: {candidate!r}')
         self.used_ids.add(candidate)
@@ -206,6 +211,10 @@ class _MarkdownParser:
         for token in tokens:
             token_type = str(token.get('type') or '')
             if token_type == 'blank_line':
+                continue
+            if token_type == 'block_math':
+                blocks.append(self.block('math', '$$\n' + token['raw'] + '\n$$', editable=False))
+                self.emitted = True
                 continue
             if token_type == 'heading':
                 rich = _inline_content(token.get('children') or [])
@@ -368,7 +377,7 @@ class _MarkdownParser:
         return roots
 
     def parse(self) -> WriterDocument:
-        blocks = self.heading_tree(self.parse_sequence(self.parser(self.parser_markdown)))
+        blocks = self.heading_tree(self.parse_sequence(self.tokens))
         document = WriterDocument(
             document_id=self.document_id,
             stage='final',
@@ -591,6 +600,20 @@ def _preserved_block_source(block: WriterBlock) -> Optional[str]:
     return None
 
 
+def _render_code_block(block: WriterBlock) -> str:
+    if re.match(r'^\s*(```|~~~)', block.content):
+        code = block.content
+    else:
+        extras = block.model_extra or {}
+        language = str(extras.get('language') or block.provider_payload.get('code_language') or '').strip()
+        meta = str(block.provider_payload.get('code_meta') or '').strip()
+        info = f'{language}{(" " + meta) if meta else ""}'
+        fence = _code_fence(block.content)
+        code = f'{fence}{info}\n{block.content}\n{fence}'
+    caption = str(block.provider_payload.get('numbering_caption') or '').strip()
+    return '\n'.join(filter(None, [caption, code]))
+
+
 def _render_block(block: WriterBlock, depth: int, allow_raw: bool) -> str:
     if allow_raw:
         raw = _preserved_block_source(block)
@@ -616,17 +639,7 @@ def _render_block(block: WriterBlock, depth: int, allow_raw: bool) -> str:
         ]))
         return '\n'.join(f'> {line}' if line else '>' for line in body.split('\n'))
     elif block.type == 'code':
-        if re.match(r'^\s*(```|~~~)', block.content):
-            code = block.content
-        else:
-            extras = block.model_extra or {}
-            language = str(extras.get('language') or block.provider_payload.get('code_language') or '').strip()
-            meta = str(block.provider_payload.get('code_meta') or '').strip()
-            info = f'{language}{(" " + meta) if meta else ""}'
-            fence = _code_fence(block.content)
-            code = f'{fence}{info}\n{block.content}\n{fence}'
-        caption = str(block.provider_payload.get('numbering_caption') or '').strip()
-        current = '\n'.join(filter(None, [caption, code]))
+        current = _render_code_block(block)
     elif block.type == 'table':
         grid = table_grid(block)
         cells = [
@@ -646,6 +659,9 @@ def _render_block(block: WriterBlock, depth: int, allow_raw: bool) -> str:
         lines = [f'| {" | ".join(cells[0])} |', f'| {" | ".join(dividers)} |']
         lines.extend(f'| {" | ".join(row)} |' for row in cells[1:])
         current = '\n\n'.join(filter(None, [block.content.strip(), '\n'.join(lines)]))
+    elif block.type == 'math':
+        source = block.content.strip()
+        current = source if source.startswith(('$$', r'\[')) else '$$\n' + source + '\n$$'
     elif block.type == 'divider':
         current = block.content.strip() if re.fullmatch(r'(?:[-*_]\s*){3,}', block.content.strip()) else '---'
     elif block.type == 'image':
