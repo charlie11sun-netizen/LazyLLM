@@ -493,6 +493,10 @@ Output semantics:
 - Operation keys are supplied by the program and are separate from instruction_id. Copy them exactly.
 - For an update with located_old_string, return contents[key] containing only new_string.
   Rewrite that complete range, including required headings and structure, without copying old_string.
+  new_string replaces only located_old_string. Unaffected text, images, tables and references
+  outside that range are retained by the program; do not copy them into new_string merely to preserve them.
+  Content already inside located_old_string must still be retained, changed or removed as instructed.
+  Use surrounding content as context; include copies of it only when explicitly requested by this update.
 - For a create with located_old_string, return insertions[key] containing only insert_text.
   located_old_string is read-only location context, not text to return. The program retains it
   and inserts insert_text before/after that complete anchor. Do not return the revised anchor.
