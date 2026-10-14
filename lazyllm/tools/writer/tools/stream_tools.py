@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import re
 import time
-from contextvars import copy_context
+import asyncio
+from concurrent.futures import CancelledError
+from threading import Event
 from queue import Empty, Queue
 from typing import Any, Callable, Dict, Iterator, List, Literal, Optional, Tuple
 
@@ -26,7 +28,7 @@ from ..utils import (
     to_prompt_json,
 )
 
-_WRITER_STREAM_EXECUTOR = ThreadPoolExecutor(max_workers=config['thread_pool_worker_num'])
+_WRITER_STREAM_EXECUTOR = ThreadPoolExecutor(max_workers=config['thread_pool_worker_num'], local_scope='inherit')
 
 
 def resolve_stream_idle_timeout(llm: Any, idle_timeout: Optional[float]) -> float:
@@ -126,7 +128,7 @@ class DraftPreviewStream(Iterator[str]):
         label: str = 'Draft preview',
     ):
         self._queue: Queue[Dict[str, Any]] = Queue()
-        self._cancelled = False
+        self._cancelled = Event()
         # Only user-visible preview deltas count as forward progress. Provider
         # reasoning/heartbeat frames may continue indefinitely after the model
         # has stopped producing document content.
@@ -138,9 +140,33 @@ class DraftPreviewStream(Iterator[str]):
         self._label = label
         self._result: Optional[dict] = None
         self._error: Optional[BaseException] = None
-        context = copy_context()
-        self._future = _WRITER_STREAM_EXECUTOR.submit(context.run, call, self._sink)
+        self._timing_started = time.monotonic()
+        self._timings: Dict[str, Any] = {
+            'started_at_unix_ms': time.time() * 1000,
+            'call_started_ms': None,
+            'first_response_ms': None,
+            'first_visible_ms': None,
+            'generation_finished_ms': None,
+        }
+        self._future = _WRITER_STREAM_EXECUTOR.submit(self._call, call)
         self._iterator = self._iterate()
+
+    def _elapsed_ms(self) -> float:
+        return round((time.monotonic() - self._timing_started) * 1000, 3)
+
+    @property
+    def timings(self) -> Dict[str, Any]:
+        '''Milliseconds from stream submission; missing milestones remain None.
+
+        First response is the first nonempty stream-sink delta (including thinking),
+        not HTTP headers. First visible excludes synthetic prefixes and thinking.
+        Generation finished is successful model-call return, before artifact saving.
+        '''
+        return dict(self._timings)
+
+    def _record_visible(self, deltas: List[str]) -> None:
+        if self._timings['first_visible_ms'] is None and any(delta.strip() for delta in deltas):
+            self._timings['first_visible_ms'] = self._elapsed_ms()
 
     def __iter__(self) -> 'DraftPreviewStream':
         return self
@@ -162,14 +188,36 @@ class DraftPreviewStream(Iterator[str]):
         return self._result
 
     def close(self) -> None:
-        self._cancelled = True
-        self._future.cancel()
-        self._iterator.close()
-        self._drain_queue()
+        try:
+            self._iterator.close()
+        finally:
+            self._stop_and_wait()
+            self._drain_queue()
+
+    def _stop_and_wait(self) -> None:
+        if not self._future.done():
+            self._cancelled.set()
+            self._future.cancel()
+        try:
+            self._future.exception()
+        except CancelledError:
+            pass
+
+    def _check_cancelled(self) -> None:
+        if self._cancelled.is_set():
+            raise asyncio.CancelledError(f'{self._label} cancelled')
+
+    def _call(self, call):
+        self._check_cancelled()
+        self._timings['call_started_ms'] = self._elapsed_ms()
+        response = call(self._sink)
+        self._timings['generation_finished_ms'] = self._elapsed_ms()
+        return response
 
     def _sink(self, payload: Dict[str, Any]) -> None:
-        if self._cancelled:
-            return
+        self._check_cancelled()
+        if self._timings['first_response_ms'] is None and payload.get('delta'):
+            self._timings['first_response_ms'] = self._elapsed_ms()
         self._queue.put(dict(payload))
 
     def _iterate(self) -> Iterator[str]:
@@ -182,6 +230,7 @@ class DraftPreviewStream(Iterator[str]):
                     self._raise_if_idle()
                     continue
                 deltas = self._consume(payload)
+                self._record_visible(deltas)
                 if any(delta for delta in deltas):
                     self._last_activity = time.monotonic()
                 else:
@@ -190,19 +239,21 @@ class DraftPreviewStream(Iterator[str]):
 
             for payload in self._drain_queue():
                 deltas = self._consume(payload)
+                self._record_visible(deltas)
                 if any(delta for delta in deltas):
                     self._last_activity = time.monotonic()
                 yield from deltas
 
             final_deltas, self._result = self._finalize(self._future.result())
+            self._record_visible(final_deltas)
             yield from final_deltas
         except BaseException as exc:
             self._error = exc
             raise
         finally:
             if self._result is None:
-                self._cancelled = True
-                self._future.cancel()
+                self._stop_and_wait()
+                self._drain_queue()
 
     def _poll_timeout(self) -> float:
         remaining = self._idle_timeout - (time.monotonic() - self._last_activity)
@@ -230,17 +281,28 @@ class DraftMarkdownStream(DraftPreviewStream):
         idle_timeout: float,
         *,
         label: str = 'Draft Markdown',
+        preview: Optional[Callable[[str], str]] = None,
     ):
         normalizer = MarkdownStreamNormalizer()
+        emitted_preview = ''
+
+        def project(deltas: List[str]) -> List[str]:
+            nonlocal emitted_preview
+            if preview is None:
+                return deltas
+            content = preview(normalizer.body)
+            delta = content[len(emitted_preview):]
+            emitted_preview = content
+            return [delta] if delta else []
 
         def consume(payload: Dict[str, Any]) -> List[str]:
             if payload.get('tag') != 'text':
                 return []
-            return normalizer.feed(str(payload.get('delta') or ''))
+            return project(normalizer.feed(str(payload.get('delta') or '')))
 
         def finish(response: Any) -> Tuple[List[str], dict]:
             body = str(response).strip()
-            deltas = normalizer.finish()
+            deltas = project(normalizer.finish())
             if normalizer.body != body:
                 raise ValueError(
                     f'Streamed {label} content does not match the normalized LLM response.'
@@ -827,6 +889,30 @@ class OutlineIRStream(IRPreviewStream):
         )
 
 
+def _outline_markdown_preview(markdown: str) -> str:
+    '''Writer owns the human-readable preview; consumers receive ordinary Markdown.'''
+    lines = []
+    for line in markdown.split('\n'):
+        stripped = line.lstrip()
+        if stripped and '<!-- writer:outline'.startswith(stripped):
+            lines.append('')
+        elif re.match(r'<!--\s*writer:outline\b', stripped):
+            match = re.search(r'"outline_description"\s*:\s*"((?:[^"\\]|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*)', stripped)
+            description = ''
+            if match:
+                try:
+                    description = json.loads('"' + match[1] + '"').rstrip()
+                    description = re.sub(r'[\ud800-\udbff]$', '', description)
+                except ValueError:
+                    pass
+            # Metadata is plain text, not executable HTML or Markdown syntax.
+            escaped = ''.join(c if c.isalnum() or c == ' ' else f'&#{ord(c)};' for c in description)
+            lines.append(escaped)
+        else:
+            lines.append(line)
+    return '\n'.join(lines)
+
+
 def build_outline_stream(
     tools: Any,
     task: Any,
@@ -885,6 +971,7 @@ def build_outline_stream(
             prefix='',
             idle_timeout=timeout,
             label='Outline Markdown',
+            preview=_outline_markdown_preview,
         )
 
     document_id = f'{writing_context.context_id}-outline'

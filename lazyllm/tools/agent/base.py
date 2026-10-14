@@ -16,6 +16,12 @@ TOOL_OBSERVATION_KEY = '_lazyllm_tool_observation'
 TOOL_OBSERVATION_VERSION = 1
 
 
+def _clear_unfinished_agent_state(agent_state, histories, model_id=None):
+    agent_state.pop('workspace', None)
+    if model_id is not None:
+        histories.pop(model_id, None)
+
+
 def _write_agent_data(tag: str, **kwargs):
     payload = {'tag': tag, **kwargs}
     lazyllm.FileSystemQueue().enqueue(
@@ -90,7 +96,11 @@ class LazyLLMAgentBase(ModuleBase):
                  desc: str = '', workspace: Optional[str] = None,
                  sandbox: Union[str, LazyLLMSandboxBase, None] = 'auto',
                  fs: Optional[Any] = None, skills_dir: Optional[str] = None,
-                 enable_builtin_tools: bool = True):
+                 enable_builtin_tools: bool = True,
+                 prompt_skills: Optional[Iterable[str]] = None,
+                 excluded_skills: Optional[Iterable[str]] = None,
+                 skill_search: Optional[Callable] = None,
+                 skill_tool_mode: str = 'full'):
         super().__init__(return_trace=return_trace)
         use_skills, skills = self._normalize_skills_config(skills)
         if not use_skills and (fs is not None or skills_dir is not None):
@@ -121,6 +131,8 @@ class LazyLLMAgentBase(ModuleBase):
         if use_skills:
             self._skill_manager = SkillManager(
                 dir=skills_dir, skills=self._skills, fs=fs, sandbox=self._sandbox,
+                prompt_skills=prompt_skills, excluded_skills=excluded_skills,
+                skill_search=skill_search, skill_tool_mode=skill_tool_mode,
             )
             self._ensure_default_skill_tools()
         self._tools_manager = ToolManager(

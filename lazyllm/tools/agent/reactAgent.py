@@ -1,10 +1,12 @@
-from typing import List, Any, Dict, Optional, Union, Callable
+import asyncio
+from typing import List, Any, Dict, Optional, Union, Callable, Iterable
 
 from lazyllm import LOG, globals as lazyllm_globals, locals, loop, once_wrapper
+from lazyllm.components import ChatPrompter
 from lazyllm.components.prompter.builtinPrompt import FC_PROMPT_PLACEHOLDER
 from lazyllm.tools.sandbox.sandbox_base import LazyLLMSandboxBase
 
-from .base import LazyLLMAgentBase, _model_facing_prefix, _write_agent_data
+from .base import LazyLLMAgentBase, _model_facing_prefix, _write_agent_data, _clear_unfinished_agent_state
 from .functionCall import FunctionCall
 
 INSTRUCTION = f'''
@@ -84,11 +86,18 @@ class ReactAgent(LazyLLMAgentBase):
                  on_max_retries: Optional[Callable] = None,
                  history_compactor: Optional[Callable] = None,
                  runtime_observer: Optional[Callable] = None,
-                 model_context_provider: Optional[Callable[[], Optional[str]]] = None):
+                 model_context_provider: Optional[Callable[[], Optional[str]]] = None,
+                 prompt_skills: Optional[Iterable[str]] = None,
+                 excluded_skills: Optional[Iterable[str]] = None,
+                 skill_search: Optional[Callable] = None,
+                 skill_tool_mode: str = 'full',
+                 before_model_request: Optional[Callable[[], None]] = None):
         super().__init__(llm=llm, tools=tools, max_retries=max_retries, return_trace=return_trace,
                          stream=stream, return_last_tool_calls=return_last_tool_calls, skills=skills,
                          desc=desc, workspace=workspace, sandbox=sandbox, fs=fs, skills_dir=skills_dir,
-                         enable_builtin_tools=enable_builtin_tools)
+                         enable_builtin_tools=enable_builtin_tools, prompt_skills=prompt_skills,
+                         excluded_skills=excluded_skills, skill_search=skill_search,
+                         skill_tool_mode=skill_tool_mode)
         prompt = prompt or INSTRUCTION
         if self._return_last_tool_calls:
             prompt += '\nIf no more tool calls are needed, reply with ok and skip any summary.'
@@ -101,10 +110,22 @@ class ReactAgent(LazyLLMAgentBase):
         self._history_compactor = history_compactor
         self._runtime_observer = runtime_observer
         self._model_context_provider = model_context_provider
+        self._before_model_request = before_model_request
         self._extra_stop_condition = extra_stop_condition
         self._on_max_retries = on_max_retries
         self._stop_tools: set = set()
         self._fc = None
+
+    def forward(self, *args, **kwargs):
+        agent_state, histories = locals['_lazyllm_agent'], locals['chat_history']
+        try:
+            return super().forward(*args, **kwargs)
+        except asyncio.CancelledError:
+            _clear_unfinished_agent_state(agent_state, histories, self._fc._llm._module_id if self._fc else None)
+            raise
+        except Exception:
+            _clear_unfinished_agent_state(agent_state, histories, self._fc._llm._module_id if self._fc else None)
+            raise
 
     def set_stop_tools(self, stop_tools: Optional[List[str]]) -> None:
         self._stop_tools = set(stop_tools) if stop_tools else set()
@@ -141,7 +162,8 @@ class ReactAgent(LazyLLMAgentBase):
                           stop_tools=list(self._stop_tools) if self._stop_tools else None,
                           round_limit=self._max_retries + 1,
                           runtime_observer=self._runtime_observer,
-                          model_context_provider=self._model_context_provider)
+                          model_context_provider=self._model_context_provider,
+                          before_model_request=getattr(self, '_before_model_request', None))
         agent = loop(
             fc,
             stop_condition=self._stop,
@@ -197,7 +219,13 @@ class ReactAgent(LazyLLMAgentBase):
             f'{obs_text}\n\n'
             f'{_FORCE_SUMMARIZE_MSG}'
         )
-        summarize_llm = self._llm.share(stream=False)
+        validator = getattr(self._tools_manager, 'context_validator', None)
+        if validator is not None:
+            # Keep the fallback request explicit so its complete input is budgeted too.
+            validator({'system_prompt': '', 'tool_definitions': []}, [], summarize_prompt)
+            summarize_llm = self._llm.share(prompt=ChatPrompter(instruction=''), stream=False)
+        else:
+            summarize_llm = self._llm.share(stream=False)
         resp = summarize_llm(summarize_prompt)
         summary = resp if isinstance(resp, str) else (
             resp.get('content', '') if isinstance(resp, dict) else None
@@ -234,7 +262,5 @@ class ReactAgent(LazyLLMAgentBase):
                     if self._fc is not None:
                         locals['chat_history'].pop(self._fc._llm._module_id, None)
                     return summary
-        if self._fc is not None:
-            locals['chat_history'].pop(self._fc._llm._module_id, None)
         raise ValueError(f'After retrying {self._max_retries} times, the react agent still failes to call '
                          f'successfully.')

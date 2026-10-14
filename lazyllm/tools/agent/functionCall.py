@@ -3,6 +3,7 @@ from lazyllm.components import ChatPrompter, FunctionCallFormatter
 from lazyllm import LOG, globals as lazyllm_globals, pipeline, loop, locals, package, FileSystemQueue, once_wrapper
 from .toolsManager import ToolManager
 from typing import List, Any, Dict, Union, Callable, Optional
+from .history import describe_tool_turns
 from .base import (
     LazyLLMAgentBase,
     TOOL_OBSERVATION_KEY,
@@ -12,6 +13,7 @@ from .base import (
     strip_tool_observations,
     _write_agent_data,
     _unwrap_tool_result,
+    _clear_unfinished_agent_state,
 )
 from lazyllm.components.prompter.builtinPrompt import FC_PROMPT_PLACEHOLDER
 from lazyllm.common.deprecated import deprecated
@@ -19,6 +21,7 @@ from lazyllm.tools.sandbox.sandbox_base import LazyLLMSandboxBase, create_sandbo
 import re
 import json
 import inspect
+import asyncio
 
 FC_PROMPT = f'''# Tools
 
@@ -94,7 +97,8 @@ class FunctionCall(ModuleBase):
                  round_limit: Optional[int] = None,
                  history_compactor: Optional[Callable[..., Any]] = None,
                  runtime_observer: Optional[Callable[..., Any]] = None,
-                 model_context_provider: Optional[Callable[[], Optional[str]]] = None):
+                 model_context_provider: Optional[Callable[[], Optional[str]]] = None,
+                 before_model_request: Optional[Callable[[], None]] = None):
         super().__init__(return_trace=return_trace)
         if _tool_manager is None:
             assert tools, 'tools cannot be empty.'
@@ -113,6 +117,7 @@ class FunctionCall(ModuleBase):
         self._round_limit = round_limit
         self._runtime_observer = runtime_observer
         self._model_context_provider = model_context_provider
+        self._before_model_request = before_model_request
         prompt = _prompt or FC_PROMPT
         self._system_prompt = prompt
         self._prompter = ChatPrompter(
@@ -147,6 +152,7 @@ class FunctionCall(ModuleBase):
             locals[_ROUND_TOOLS_KEY] = snapshots
         if refresh or self._module_id not in snapshots:
             snapshots[self._module_id] = tuple(self._tools_manager.tools_description)
+            self._observe_runtime('tools_ready', tool_definitions=list(snapshots[self._module_id]))
         return list(snapshots[self._module_id])
 
     def _get_visible_tool_names(self):
@@ -207,6 +213,7 @@ class FunctionCall(ModuleBase):
             'prefix': prefix,
             'current_input': current_input,
             'current_round_messages': current,
+            'tool_turns': describe_tool_turns(prior_history, current),
         }
         if self._model_context_provider is not None:
             kwargs['reserved_runtime_context_tokens'] = _MODEL_CONTEXT_RESERVED_TOKENS
@@ -224,6 +231,8 @@ class FunctionCall(ModuleBase):
                 accepts_kwargs or 'remaining_rounds' in signature.parameters
             ):
                 kwargs['remaining_rounds'] = remaining_rounds
+            if not accepts_kwargs and 'tool_turns' not in signature.parameters:
+                kwargs.pop('tool_turns', None)
             if not accepts_kwargs and 'current_round_messages' not in signature.parameters:
                 kwargs.pop('current_round_messages', None)
             if not accepts_kwargs and 'current_input' not in signature.parameters:
@@ -264,6 +273,13 @@ class FunctionCall(ModuleBase):
             LOG.warning('[ModelContextProvider] context was truncated to fit the input budget')
         self._observe_runtime('runtime_context_delivered', context_count=1)
         return [{'role': 'user', 'content': content}]
+
+    def _validate_context(self, history, current_input=None):
+        validator = getattr(self._tools_manager, 'context_validator', None)
+        if validator is not None:
+            prefix = _model_facing_prefix(self._system_prompt, self._tools_manager, self._skill_manager)
+            prefix['tool_definitions'] = self._get_current_tools()
+            validator(prefix, history, current_input)
 
     def _notify_history_ready(
         self,
@@ -331,10 +347,20 @@ class FunctionCall(ModuleBase):
             locals['chat_history'][self._llm._module_id] = compacted_prior
         else:
             locals['chat_history'].pop(self._llm._module_id, None)
+        self._validate_context(compacted_prior + compacted_current)
         self._notify_history_ready(workspace, current_round, compacted_prior + compacted_current)
         return {'input': compacted_current}
 
     def _build_history(self, input: Union[str, dict, list]):
+        prepare = getattr(self, '_before_model_request', None)
+        if prepare is not None:
+            if not callable(prepare) or inspect.iscoroutinefunction(prepare):
+                raise TypeError('before_model_request must be a synchronous callable returning None')
+            result = prepare()
+            if inspect.iscoroutine(result):
+                result.close()
+            if result is not None:
+                raise TypeError('before_model_request must return None')
         self._get_current_tools(refresh=True)
         workspace = locals['_lazyllm_agent']['workspace']
         history_idx = len(workspace.setdefault('history', []))
@@ -368,10 +394,17 @@ class FunctionCall(ModuleBase):
             workspace=workspace,
             remaining_rounds=remaining_rounds,
         )
+        notices = self._consume_model_context()
         if compacted_prior:
             locals['chat_history'][self._llm._module_id] = compacted_prior
         else:
             locals['chat_history'].pop(self._llm._module_id, None)
+        if notices:
+            current = [{'role': 'user', 'content': current_input}, *notices]
+            self._validate_context(compacted_prior + current)
+            self._notify_history_ready(workspace, current_round, compacted_prior + current)
+            return {'input': current}
+        self._validate_context(compacted_prior, current_input)
         self._notify_history_ready(workspace, current_round, compacted_prior)
         return input
 
@@ -452,7 +485,8 @@ class FunctionCall(ModuleBase):
         return llm_output
 
     def forward(self, input: str, llm_chat_history: List[Dict[str, Any]] = None):
-        workspace = locals['_lazyllm_agent'].setdefault('workspace', {})
+        agent_state, histories = locals['_lazyllm_agent'], locals['chat_history']
+        workspace = agent_state.setdefault('workspace', {})
         workspace.setdefault('history', list(llm_chat_history or []))
         if self._round_limit is not None and llm_chat_history is not None:
             previous_round = workspace.get('_react_round_number')
@@ -465,15 +499,14 @@ class FunctionCall(ModuleBase):
                 f'preserved_history_messages={preserved_history_messages} '
                 f'new_round_limit={self._round_limit or 0}'
             )
-        self._tools_manager.sync_active_groups(input, llm_chat_history)
         try:
+            self._tools_manager.sync_active_groups(input, llm_chat_history)
             result = self._impl(input)
-        except Exception:
+        except (asyncio.CancelledError, Exception):
             # On failure, clear any in-progress workspace and the LLM chat history so that
             # the next call (e.g. user says "continue") does not inherit a corrupted history
             # that may contain truncated tool_calls with invalid JSON arguments.
-            locals['_lazyllm_agent'].pop('workspace', None)
-            locals['chat_history'].pop(self._llm._module_id, None)
+            _clear_unfinished_agent_state(agent_state, histories, self._llm._module_id)
             raise
 
         # If the model decides not to call any tools, the result is a string. For debugging and subsequent tasks,

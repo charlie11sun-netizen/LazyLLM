@@ -1,3 +1,4 @@
+from .history import ToolCallTurn, describe_tool_turns
 from .functionCall import FunctionCall, FunctionCallAgent
 from .toolsManager import fc_register, register, ToolManager
 from .tool_runtime import (
@@ -15,6 +16,7 @@ from .tool_runtime import (
     ToolExecutionDisposition,
     ToolExecutionRecord,
     ToolRuntimeMetadata,
+    get_tool_runtime_metadata,
 )
 from .base import (
     LazyLLMAgentBase,
@@ -30,13 +32,15 @@ from .planAndSolveAgent import PlanAndSolveAgent
 from .rewooAgent import ReWOOAgent
 from .toolsManager import ModuleTool
 from .code_interpreter import code_interpreter
-from .skill_manager import SkillManager
+from .skill_manager import SkillManager, inherit_skill_scope
 from .skill_hub import install_skill
 from .todo_tool import todo_write
 from .file_tool import FileSystemToolkit
 from .toolError import ToolExecutionError
 
 __all__ = [
+    'ToolCallTurn',
+    'describe_tool_turns',
     'TOOL_OBSERVATION_KEY',
     'TOOL_OBSERVATION_VERSION',
     'attachable_tool_observation',
@@ -64,12 +68,14 @@ __all__ = [
     'ToolExecutionBatch',
     'ToolExecutionDisposition',
     'ToolRuntimeMetadata',
+    'get_tool_runtime_metadata',
     'ReactAgent',
     'PlanAndSolveAgent',
     'ReWOOAgent',
     'ModuleTool',
     'code_interpreter',
     'SkillManager',
+    'inherit_skill_scope',
     'install_skill',
     'todo_write',
     'ToolExecutionError',

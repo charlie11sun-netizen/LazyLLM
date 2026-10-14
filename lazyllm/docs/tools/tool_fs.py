@@ -47,6 +47,20 @@ Notion document link usage:
     - Do not use generic URL fetching first for private Notion pages; clearly report when the integration is not connected, unauthorized, or lacks access.'''
 
 # LazyLLMFSBase
+_add_fs_chinese('fs_read_limits', '''按执行上下文限制云端读取，默认总时限 20 秒、响应解压后累计 16 MiB、256 次 HTTP 请求。
+仅在 with 范围启用；退出恢复原上下文，其他 FS 调用不受影响。限制范围内响应流式计数、禁止重定向，单次连接/读取等待最多 5 秒。
+字节数/请求数超限抛 FSReadLimitError，时限超限抛 TimeoutError。不能强制中断 CPU 解析，硬取消由调用方管理。''')
+_add_fs_english('fs_read_limits', '''Context-local cloud read limits: 20 seconds, 16 MiB of decoded response bytes and 256 HTTP requests by default.
+Enabled only inside the with block; existing calls outside it are unchanged. Responses are counted while streaming, redirects rejected, and connect/read waits capped at five seconds.
+Raises FSReadLimitError for byte/request overflow and TimeoutError for deadline expiry. CPU parsing requires caller-owned hard cancellation.''')
+_add_fs_chinese('FSReadLimitError', '云端读取超过字节数/请求次数限制或遇到受限重定向。')
+_add_fs_english('FSReadLimitError', 'Cloud reads exceeded byte/request limits or encountered a restricted redirect.')
+_add_fs_chinese('GoogleDriveFS.list_page', '''查询一页文件/目录。folder_id 限定直接子项；query 可为空，query_mode 为 name 或 full_text；drive_id 限定共享盘。
+page_size 为 1–1000，page_token 传前页的 next_page_token。返回 items、next_page_token、incomplete_search；空页也可能有下一页。
+结果保留文件 ID、父目录、类型和原文链接。不代替用户授权校验，不改变现有 ls/search 返回。''')
+_add_fs_english('GoogleDriveFS.list_page', '''Fetch one files/folders page. folder_id limits direct children; query may be empty; query_mode is name or full_text; drive_id scopes a shared drive.
+page_size is 1–1000; page_token accepts the previous next_page_token. Returns items, next_page_token and incomplete_search; empty pages can have a continuation.
+Preserves IDs, parents, types and source URLs. Caller owns authorization. Existing ls/search contracts remain unchanged.''')
 _add_fs_chinese('LazyLLMFSBase', '''\
 云文件系统统一基类，继承 fsspec.AbstractFileSystem，借助 registry 注册各平台实现。混入 CredentialMixin 提供统一的 token 生命周期管理。
 子类需实现：_setup_auth、ls、info、_open、_download_range、_upload_data 等；可选实现 rm_file、mkdir。
@@ -1913,35 +1927,39 @@ Args:
     new_text (str): New plain text content.
 ''')
 
-_add_fs_chinese('FeishuWikiFS.search', '''\
-在飞书知识库中按关键词搜索节点，使用飞书官方 wiki/v2/nodes/search 接口。
-搜索范围包括节点标题和正文内容，返回当前用户可见的匹配 wiki 节点。
-
-这是在线搜索 —— 直接查询飞书线上知识库，不是本地已入库的文档。
+for _feishu_search_class in ('FeishuFS', 'FeishuWikiFS'):
+    _add_fs_chinese(f'{_feishu_search_class}.search', '''\
+使用当前用户 OAuth 搜索在线普通文档、Wiki 或两者，每次返回一页。
+默认组合搜索忽略配置的 Wiki 空间；显式空间或节点会将 all 收窄为 Wiki。
 
 Args:
-    query (str or List[str]): 一个搜索词、以空格分隔的多个词，或搜索词列表。
-    space_id (str, optional): 要搜索的知识空间 ID；为空时搜索当前用户可见的全部 Wiki。
-    node_id (str, optional): 将范围限定到指定节点及其子节点；使用时必须同时提供 space_id。
-    page_size (int): 最大返回条数，默认 20，最大 50。
+    query (str or List[str]): 短关键词或关键词列表。
+    space_id (str): 显式 Wiki 空间；不能与 document 组合。
+    node_id (str): Wiki 父节点；必须同时提供有效 space_id。
+    page_size (int): 本页条数，1–20，默认 20。
+    page_token (str): 上页返回的分页标识；翻页时保持查询、类型和范围不变。
+    source_type (str): all（默认，文档和 Wiki）、document（普通文档）或 wiki。
 
 Returns:
-    List[Dict[str, Any]]: 匹配节点列表。每项包含 title、node_token、obj_type、url、space_id。
+    Dict[str, Any]: source、source_type、scope、results、has_more、page_token 和 coverage。
+        结果保留服务端元数据及 URL；按需使用 resolve/read 读取正文。
 ''')
-_add_fs_english('FeishuWikiFS.search', '''\
-Search wiki nodes by keyword using Feishu's official wiki/v2/nodes/search API.
-Matches node titles and content visible to the current user.
-
-This searches the LIVE online Feishu wiki — not locally indexed documents.
+    _add_fs_english(f'{_feishu_search_class}.search', '''\
+Search one page of live documents, Wiki, or both with the current user's OAuth.
+Combined search ignores configured Wiki spaces; explicit scope narrows all to Wiki.
+Wiki mode uses a configured space when no space is supplied.
 
 Args:
-    query (str or List[str]): One term, multiple space-separated terms, or a list of terms.
-    space_id (str, optional): Wiki space ID to search; when empty, searches all Wiki spaces visible to the user.
-    node_id (str, optional): Limit the search to a node and its descendants; requires space_id.
-    page_size (int): Maximum results, default 20, maximum 50.
+    query (str or List[str]): Short keywords or a list of terms.
+    space_id (str): Explicit Wiki space; incompatible with document mode.
+    node_id (str): Wiki parent node; requires an explicit valid space_id.
+    page_size (int): Results per page, 1–20, default 20.
+    page_token (str): Continuation token; keep query, source_type and scope unchanged.
+    source_type (str): all (default, documents and Wiki), document, or wiki.
 
 Returns:
-    List[Dict[str, Any]]: Matching nodes, each with title, node_token, obj_type, url, and space_id.
+    Dict[str, Any]: source, source_type, scope, results, has_more, page_token and coverage.
+        Results retain provider metadata and URLs; use resolve/read for body evidence.
 ''')
 
 _add_fs_chinese('FeishuWikiFS.find', '''\
