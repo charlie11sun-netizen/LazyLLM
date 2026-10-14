@@ -52,7 +52,7 @@ class ModifyPlan(BaseModel):
 
 
 class MarkdownModifyInstruction(ModifyInstruction):
-    target_scope: Literal['section', 'paragraph', 'fragment'] = 'fragment'
+    target_scope: Literal['section', 'paragraph', 'fragment', 'image'] = 'fragment'
     locator_text: Optional[str] = None
     destination_scope: Optional[Literal['section', 'paragraph', 'fragment']] = None
     destination_locator_text: Optional[str] = None
@@ -182,8 +182,13 @@ class MarkdownRevisionContent(BaseModel):
     new_string: str = Field(min_length=1)
 
 
+class MarkdownInsertionContent(BaseModel):
+    insert_text: str = Field(min_length=1, description='Only the new text to insert; the existing anchor is retained.')
+
+
 class MarkdownRevisionBatch(BaseModel):
     contents: Dict[str, MarkdownRevisionContent] = Field(default_factory=dict)
+    insertions: Dict[str, MarkdownInsertionContent] = Field(default_factory=dict)
     replacements: Dict[str, List[StringReplace]] = Field(default_factory=dict)
 
 
