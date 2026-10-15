@@ -96,10 +96,19 @@ Plan semantics:
   existing insertion anchors or move destinations, not to choose a different edit source.
 - For create, content_ref is the existing insertion anchor in the current document;
   position is before or after that anchor. Do not put the anchor in destination_ref.
+- Every IR create must explicitly set anchor_scope. Use "section" when the user means
+  before or after an entire named section, including its body and subsections; keep that
+  section's heading as content_ref. Use "block" for a specific paragraph, image, table,
+  or an explicit insertion immediately after a heading line and before its body.
+  Infer this from the full request: inserting a new section after a named section means
+  "section", while adding an introduction directly under its heading means "block".
+  The program ends a section before the next heading of the same or higher level,
+  or at the end of its containing block list. Do not move existing content to make room.
+  Leave anchor_scope null for update, delete and move; it controls create placement only.
 - destination_ref is used only by move; leave it null for all other operations.
 - For a new section, keep the user's exact insertion anchor, including a paragraph inside
-  an existing subsection, and state the requested heading level in instruction. New blocks
-  are inserted as siblings immediately before or after that anchor; its subtree stays intact.
+  an existing subsection, and state the requested heading level in instruction. The new
+  heading level is independent of anchor_scope; preserve the selected insertion boundary.
   Generate only new content. Do not plan moves or rewrites of following content merely to
   implement the insertion; the program preserves its existing parent and relative order.
   Preserve existing heading levels unless the user explicitly requests changing them.

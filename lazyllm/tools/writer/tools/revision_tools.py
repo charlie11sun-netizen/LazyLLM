@@ -995,6 +995,7 @@ locator kind per reference. Return valid JSON only.
                 revised,
                 self._node_id(instruction.content_ref, 'content_ref'),
                 instruction.position,
+                instruction.anchor_scope,
             )
             created = [self._new_block(revised.stage, content) for content in blocks]
             siblings = self._children_for_parent(revised, parent_id)
@@ -1115,9 +1116,24 @@ locator kind per reference. Return valid JSON only.
         document: WriterDocument,
         destination_node_id: str,
         position: str,
+        anchor_scope: Optional[str] = None,
     ) -> Tuple[Optional[str], int]:
         parent_id, index = self._block_parent_index(document, destination_node_id)
-        return parent_id, index + int(position == 'after')
+        if position != 'after':
+            return parent_id, index
+        anchor = document.block_by_id(destination_node_id)
+        if anchor_scope == 'block' and anchor.type == 'heading' and anchor.children:
+            return anchor.node_id, 0
+        index += 1
+        level = self._heading_level(anchor)
+        if anchor_scope == 'section' and level is not None:
+            siblings = self._children_for_parent(document, parent_id)
+            while index < len(siblings):
+                following_level = self._heading_level(siblings[index])
+                if following_level is not None and following_level <= level:
+                    break
+                index += 1
+        return parent_id, index
 
     @staticmethod
     def _heading_level(block: WriterBlock) -> Optional[int]:
@@ -1501,6 +1517,7 @@ locator kind per reference. Return valid JSON only.
                     and normalized[-1].modify_type == 'create' \
                     and self._content_ref_key(normalized[-1].content_ref) == content_key \
                     and normalized[-1].position == instr.position \
+                    and normalized[-1].anchor_scope == instr.anchor_scope \
                     and (not isinstance(instr, MarkdownModifyInstruction) or (
                         instr.target_scope == getattr(normalized[-1], 'target_scope', None)
                         and instr.locator_text == getattr(normalized[-1], 'locator_text', None)

@@ -30,6 +30,8 @@ class ModifyInstruction(BaseModel):
     destination_ref: Optional[ContentRef] = None
     modify_type: ModifyType
     position: Optional[PatchPosition] = None
+    anchor_scope: Optional[Literal['block', 'section']] = Field(
+        default=None, description='IR create anchor: one block or its complete section; omitted keeps legacy insertion.')
     instruction: str
     meta: Dict[str, Any] = Field(default_factory=dict)
     visual_instruction: Optional[VisualInstruction] = None
