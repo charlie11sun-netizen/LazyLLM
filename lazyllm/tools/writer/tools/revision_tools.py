@@ -910,12 +910,12 @@ locator kind per reference. Return valid JSON only.
         source: str,
         plan: Optional[MarkdownModifyPlan] = None,
     ) -> None:
-        image_line = re.compile(r'!\[[^\]]*\]\([^)]*\)')
         for replacement in replace_set.replacements:
             old = (replacement.old_string or '').strip()
             if not old.startswith('!['):
                 continue
-            if not image_line.fullmatch(old):
+            images = find_markdown_images(old)
+            if len(images) != 1 or images[0].raw != old:
                 raise ValueError(
                     f'Image replacement {replacement.replacement_id!r} old_string '
                     'must be a complete image line.'
