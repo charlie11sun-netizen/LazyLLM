@@ -997,8 +997,6 @@ locator kind per reference. Return valid JSON only.
                 instruction.position,
             )
             created = [self._new_block(revised.stage, content) for content in blocks]
-            if self._insert_heading_blocks(revised, parent_id, index, created):
-                return
             siblings = self._children_for_parent(revised, parent_id)
             siblings[index:index] = created
             return
@@ -1127,73 +1125,6 @@ locator kind per reference. Return valid JSON only.
         if block.type == 'heading' and type(level) is int and 1 <= level <= 9:
             return level
         return None
-
-    def _insert_heading_blocks(
-        self,
-        document: WriterDocument,
-        parent_id: Optional[str],
-        index: int,
-        blocks: List[WriterBlock],
-    ) -> bool:
-        level = min(filter(None, map(self._heading_level, blocks)), default=0)
-        if not level:
-            return False
-        siblings = self._children_for_parent(document, parent_id)
-        while index and self._heading_level(siblings[index - 1]) is not None:
-            previous = siblings[index - 1]
-            parent_id = previous.node_id
-            siblings = previous.children
-            index = len(siblings)
-        layout = self._document_layout(document)
-        ancestors = []
-        while parent_id is not None:
-            parent = document.block_by_id(parent_id)
-            parent_level = self._heading_level(parent)
-            # Do not split tables, list items, or other non-section containers.
-            if parent_level is None:
-                return False
-            if parent_level < level:
-                break
-            ancestors.append((parent, index))
-            parent_id, index = layout[parent_id]
-            index += 1
-
-        tail = []
-        for parent, boundary in ancestors:
-            tail.extend(parent.children[boundary:])
-            del parent.children[boundary:]
-        siblings = self._children_for_parent(document, parent_id)
-        end = index
-        while end < len(siblings):
-            following_level = self._heading_level(siblings[end])
-            if following_level is not None and following_level <= level:
-                break
-            end += 1
-        tail.extend(siblings[index:end])
-        del siblings[index:end]
-
-        # Keep the exact cut open, even when a later new heading closes more ancestors.
-        stack = [parent for parent, _ in reversed(ancestors)]
-        inserted = []
-        self._append_section_content(blocks + tail, stack, inserted)
-        siblings[index:index] = inserted
-        return True
-
-    def _append_section_content(
-        self, blocks: List[WriterBlock], stack: List[WriterBlock], siblings: List[WriterBlock],
-    ) -> None:
-        for block in blocks:
-            level = self._heading_level(block)
-            if level is not None:
-                while stack and self._heading_level(stack[-1]) >= level:
-                    stack.pop()
-            destination = stack[-1].children if stack else siblings
-            destination.append(block)
-            if level is not None:
-                children = block.children
-                block.children = []
-                stack.append(block)
-                self._append_section_content(children, stack, siblings)
 
     def apply_patch(
         self,

@@ -21,9 +21,9 @@ Output semantics:
 - For changes to words or sentences within a paragraph or table cell, select that containing
   block, not its section heading or neighboring blocks.
 - Insertions target the existing section or block being extended.
-- For a new section, select the user's existing insertion anchor. The program handles
-  following content whose parent changes at the new heading boundary; do not select it
-  for rewriting or invent heading-level changes unless the user requests those changes.
+- For a new section, select the user's existing insertion anchor. Preserve following
+  content and its existing parent; do not select it for rewriting or invent heading-level
+  changes unless the user requests those changes.
 - Reordering targets every existing block whose relative order participates in the change.
 - Candidates are in document order. parent_node_id gives their current containment and
   heading_level gives the known heading level. A null parent means a root block; a null
@@ -98,10 +98,10 @@ Plan semantics:
   position is before or after that anchor. Do not put the anchor in destination_ref.
 - destination_ref is used only by move; leave it null for all other operations.
 - For a new section, keep the user's exact insertion anchor, including a paragraph inside
-  an existing subsection, and state the requested heading level in instruction. The program
-  splits the containing sections at that boundary according to the new heading level.
+  an existing subsection, and state the requested heading level in instruction. New blocks
+  are inserted as siblings immediately before or after that anchor; its subtree stays intact.
   Generate only new content. Do not plan moves or rewrites of following content merely to
-  implement that boundary; the program preserves it and adjusts its parent as needed.
+  implement the insertion; the program preserves its existing parent and relative order.
   Preserve existing heading levels unless the user explicitly requests changing them.
   For insertion at document end, use an existing final block or final section with after;
   Writer IR references must use a real node_id, never document_root.
@@ -646,8 +646,8 @@ Output semantics:
 - A create contains all new blocks in final document order. Children represent
   genuine document hierarchy.
   A new section uses a heading with the requested numbering.level and its new body as children.
-  Generate only the new content. The program places headings at the requested boundary and
-  preserves and reparents the existing following content; do not copy that content into changes.
+  Generate only the new content. The program inserts it before or after the selected block
+  without reparenting existing content; do not copy that content into changes.
 - Omit delete and move instructions from changes; the program executes these structural operations.
 - new_title represents title_instruction when the plan includes a title revision.
   If title_instruction is present and instructions is empty, return only new_title with
